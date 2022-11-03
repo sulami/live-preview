@@ -26,14 +26,18 @@ fn main() -> Result<()> {
     execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
     disable_raw_mode()?;
 
-    if !output.is_empty() {
-        print!("{}", output);
+    if let Some(o) = output {
+        if !o.is_empty() {
+            print!("{}", o);
+        }
     }
 
     Ok(())
 }
 
-fn handle_input(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<String> {
+fn handle_input(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+) -> Result<Option<String>> {
     let mut input = String::new();
     let mut output = String::new();
     let mut errors = String::new();
@@ -48,31 +52,33 @@ fn handle_input(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> R
                 code: KeyCode::Esc,
                 kind: event::KeyEventKind::Press,
                 ..
-            }) => return Ok(String::new()),
+            }) => return Ok(None),
             // Done
             Event::Key(event::KeyEvent {
                 code: KeyCode::Enter,
                 kind: event::KeyEventKind::Press,
                 ..
             }) => {
-                return Ok(output);
+                return Ok(Some(output));
             }
             // Cursor left
             Event::Key(event::KeyEvent {
                 code: KeyCode::Left,
                 kind: event::KeyEventKind::Press,
                 ..
-            }) => cursor = if cursor > 0 { cursor - 1 } else { cursor },
+            }) => {
+                if cursor > 0 {
+                    cursor -= 1;
+                }
+            }
             // Cursor right
             Event::Key(event::KeyEvent {
                 code: KeyCode::Right,
                 kind: event::KeyEventKind::Press,
                 ..
             }) => {
-                cursor = if cursor < input.len() as u16 {
-                    cursor + 1
-                } else {
-                    cursor
+                if cursor < input.len() as u16 {
+                    cursor += 1
                 }
             }
             // Delete
@@ -143,7 +149,6 @@ fn draw_ui(
     // TODO Add vertical scrolling.
     let output_box =
         Paragraph::new(output).block(Block::default().title("Stdout").borders(Borders::ALL));
-    // .wrap(Wrap { trim: true });
     f.render_widget(output_box, chunks[1]);
 
     f.set_cursor(3 + cursor, 2);
