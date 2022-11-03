@@ -81,7 +81,7 @@ fn handle_input(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> R
                 kind: event::KeyEventKind::Press,
                 ..
             }) => {
-                if !input.is_empty() {
+                if cursor > 0 {
                     cursor -= 1;
                     input.remove(cursor as usize);
                 }
