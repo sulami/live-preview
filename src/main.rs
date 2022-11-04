@@ -115,7 +115,13 @@ fn handle_input(
                 let result = p.wait_with_output().expect("Failed to wait for command");
                 errors = String::from_utf8(result.stderr).expect("Command stderr is not utf-8");
                 output = String::from_utf8(result.stdout).expect("Command stdout is not utf-8");
+            } else {
+                errors.clear();
+                output.clear();
             }
+        } else {
+            errors.clear();
+            output.clear();
         }
         terminal.draw(|f| draw_ui(f, &cursor, &input, &output, &errors))?;
     }
