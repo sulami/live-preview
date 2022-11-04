@@ -135,7 +135,7 @@ fn draw_ui(
         .split(f.size());
 
     // TODO Add dynamic resize.
-    let input_box = Paragraph::new(format!(" {}", input))
+    let input_box = Paragraph::new(input)
         .block(Block::default().title("Input").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     f.render_widget(input_box, chunks[0]);
@@ -151,5 +151,5 @@ fn draw_ui(
         Paragraph::new(output).block(Block::default().title("Stdout").borders(Borders::ALL));
     f.render_widget(output_box, chunks[1]);
 
-    f.set_cursor(3 + cursor, 2);
+    f.set_cursor(2 + cursor, 2);
 }
