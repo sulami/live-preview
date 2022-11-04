@@ -103,22 +103,17 @@ fn handle_input(
             }
             _ => (),
         }
-        let split_input: Vec<&str> = input.split_whitespace().collect();
-        if let Some(c) = split_input.first() {
-            let proc = Command::new(c)
-                .args(split_input.iter().skip(1))
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-            if let Ok(p) = proc {
-                let result = p.wait_with_output().expect("Failed to wait for command");
-                errors = String::from_utf8(result.stderr).expect("Command stderr is not utf-8");
-                output = String::from_utf8(result.stdout).expect("Command stdout is not utf-8");
-            } else {
-                errors.clear();
-                output.clear();
-            }
+        let proc = Command::new("zsh")
+            .arg("-c")
+            .arg(&input)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        if let Ok(p) = proc {
+            let result = p.wait_with_output().expect("Failed to wait for command");
+            errors = String::from_utf8(result.stderr).expect("Command stderr is not utf-8");
+            output = String::from_utf8(result.stdout).expect("Command stdout is not utf-8");
         } else {
             errors.clear();
             output.clear();
