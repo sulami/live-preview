@@ -1,5 +1,4 @@
 use std::io;
-use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use crossterm::{
@@ -7,6 +6,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt;
+use tokio::{process, select, sync::mpsc};
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -14,111 +15,204 @@ use tui::{
     Frame, Terminal,
 };
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    console_subscriber::init();
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     enable_raw_mode()?;
 
-    let output = handle_input(&mut terminal)?;
+    let output = event_loop(&mut terminal).await?;
 
     execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
     disable_raw_mode()?;
 
     if let Some(o) = output {
         if !o.is_empty() {
-            print!("{}", o);
+            print!("{o}");
         }
     }
 
     Ok(())
 }
 
-fn handle_input(
+#[derive(Debug, Default)]
+struct State {
+    cursor: u16,
+    input: String,
+    output: String,
+}
+
+async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> Result<Option<String>> {
-    let mut input = String::new();
-    let mut output = String::new();
-    let mut errors = String::new();
-    let mut cursor = 0;
+    let mut state = State::default();
 
-    terminal.draw(|f| draw_ui(f, &cursor, &input, &output, &errors))?;
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(1);
+    let (output_tx, mut output_rx) = mpsc::channel::<String>(1);
+
+    terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
+
+    tokio::spawn(child_handler(cmd_rx, output_tx));
 
     loop {
-        match event::read()? {
-            // Abort
-            Event::Key(event::KeyEvent {
-                code: KeyCode::Esc,
-                kind: event::KeyEventKind::Press,
-                ..
-            }) => return Ok(None),
-            // Done
-            Event::Key(event::KeyEvent {
-                code: KeyCode::Enter,
-                kind: event::KeyEventKind::Press,
-                ..
-            }) => {
-                return Ok(Some(output));
-            }
-            // Cursor left
-            Event::Key(event::KeyEvent {
-                code: KeyCode::Left,
-                kind: event::KeyEventKind::Press,
-                ..
-            }) => {
-                if cursor > 0 {
-                    cursor -= 1;
+        select! {
+            msg = output_rx.recv() => {
+                if let Some(output) = msg {
+                    state.output = output;
+                    terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
                 }
-            }
-            // Cursor right
-            Event::Key(event::KeyEvent {
-                code: KeyCode::Right,
-                kind: event::KeyEventKind::Press,
-                ..
-            }) => {
-                if cursor < input.len() as u16 {
-                    cursor += 1
+            },
+            msg = input_handler() => {
+                if let Some(action) = msg {
+                    match action {
+                        Action::Done => {
+                            cmd_tx.send(Cmd::Done).await?;
+                            return Ok(Some(state.output))
+                        },
+                        Action::Abort => {
+                            cmd_tx.send(Cmd::Done).await?;
+                            return Ok(None)
+                        },
+                        Action::CursorLeft => if state.cursor > 0 {
+                            state.cursor -= 1
+                        },
+                        Action::CursorRight => if state.cursor < state.input.len() as u16 {
+                            state.cursor += 1
+                        },
+                        Action::Delete => if state.cursor > 0 {
+                            state.cursor -= 1;
+                            state.input.remove(state.cursor as usize);
+                            cmd_tx.send(Cmd::Input(state.input.clone())).await?;
+                        },
+                        Action::Type(chr) => {
+                            state.input.insert(state.cursor as usize, chr);
+                            state.cursor += 1;
+                            cmd_tx.send(Cmd::Input(state.input.clone())).await?;
+                        }
+                    }
+                    terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
                 }
-            }
-            // Delete
-            Event::Key(event::KeyEvent {
-                code: KeyCode::Backspace,
-                kind: event::KeyEventKind::Press,
-                ..
-            }) => {
-                if cursor > 0 {
-                    cursor -= 1;
-                    input.remove(cursor as usize);
-                }
-            }
-            // Typing
-            Event::Key(event::KeyEvent {
-                code: KeyCode::Char(char),
-                kind: event::KeyEventKind::Press,
-                ..
-            }) => {
-                input.insert(cursor as usize, char);
-                cursor += 1;
-            }
-            _ => (),
+            },
         }
-        let proc = Command::new("zsh")
-            .arg("-c")
-            .arg(&input)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        if let Ok(p) = proc {
-            let result = p.wait_with_output().expect("Failed to wait for command");
-            errors = String::from_utf8(result.stderr).expect("Command stderr is not utf-8");
-            output = String::from_utf8(result.stdout).expect("Command stdout is not utf-8");
-        } else {
-            errors.clear();
-            output.clear();
+    }
+}
+
+#[derive(Eq, PartialEq, Clone, Copy)]
+enum Action {
+    Done,
+    Abort,
+    CursorLeft,
+    CursorRight,
+    Delete,
+    Type(char),
+}
+
+async fn input_handler() -> Option<Action> {
+    let mut event_stream = crossterm::event::EventStream::new();
+    let action = match event_stream.next().await {
+        // Abort
+        Some(Ok(Event::Key(event::KeyEvent {
+            code: KeyCode::Esc,
+            kind: event::KeyEventKind::Press,
+            ..
+        }))) => Some(Action::Abort),
+        // Done
+        Some(Ok(Event::Key(event::KeyEvent {
+            code: KeyCode::Enter,
+            kind: event::KeyEventKind::Press,
+            ..
+        }))) => Some(Action::Done),
+        // Cursor left
+        Some(Ok(Event::Key(event::KeyEvent {
+            code: KeyCode::Left,
+            kind: event::KeyEventKind::Press,
+            ..
+        }))) => Some(Action::CursorLeft),
+        // Cursor right
+        Some(Ok(Event::Key(event::KeyEvent {
+            code: KeyCode::Right,
+            kind: event::KeyEventKind::Press,
+            ..
+        }))) => Some(Action::CursorRight),
+        // Delete
+        Some(Ok(Event::Key(event::KeyEvent {
+            code: KeyCode::Backspace,
+            kind: event::KeyEventKind::Press,
+            ..
+        }))) => Some(Action::Delete),
+        // Typing
+        Some(Ok(Event::Key(event::KeyEvent {
+            code: KeyCode::Char(char),
+            kind: event::KeyEventKind::Press,
+            ..
+        }))) => Some(Action::Type(char)),
+        _ => None,
+    };
+    action
+}
+
+#[derive(Debug)]
+enum Cmd {
+    Input(String),
+    Done,
+}
+
+async fn child_handler(
+    mut cmd_chan: mpsc::Receiver<Cmd>,
+    output_chan: mpsc::Sender<String>,
+) -> Result<()> {
+    let mut child_proc: Option<process::Child> = None;
+
+    loop {
+        select! {
+            output = futures::future::OptionFuture::from(child_proc.map(|c| c.wait_with_output())) => {
+                if let Some(Ok(o)) = output {
+                    if !o.stdout.is_empty() {
+                        if let Ok(s) = String::from_utf8(o.stdout) {
+                            output_chan.send(s).await?;
+                        } else {
+                            output_chan.send("".to_string()).await?;
+                        }
+                    } else if !o.stderr.is_empty() {
+                        if let Ok(s) = String::from_utf8(o.stderr) {
+                            output_chan.send(s).await?;
+                        } else {
+                            output_chan.send("".to_string()).await?;
+                        }
+                    } else {
+                        output_chan.send("".to_string()).await?;
+                    }
+                }
+                child_proc = None;
+            },
+            msg = cmd_chan.recv() => {
+                if let Some(cmd) = msg {
+                    match cmd {
+                        Cmd::Input(input) => {
+                            let proc = process::Command::new("zsh")
+                                .arg("-c")
+                                .arg(&input)
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .kill_on_drop(true)
+                                .spawn();
+                            if let Ok(p) = proc {
+                                child_proc = Some(p);
+                            } else {
+                                child_proc = None;
+                            }
+                        },
+                        Cmd::Done => return Ok(()),
+                    }
+                } else {
+                    child_proc = None;
+                }
+            },
         }
-        terminal.draw(|f| draw_ui(f, &cursor, &input, &output, &errors))?;
     }
 }
 
@@ -127,7 +221,6 @@ fn draw_ui(
     cursor: &u16,
     input: &str,
     output: &str,
-    errors: &str,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -137,15 +230,9 @@ fn draw_ui(
 
     // TODO Add dynamic resize.
     let input_box = Paragraph::new(input)
-        .block(Block::default().title("Input").borders(Borders::ALL))
+        .block(Block::default().title("Stdin").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     f.render_widget(input_box, chunks[0]);
-
-    if !errors.is_empty() {
-        let errors_box =
-            Paragraph::new(errors).block(Block::default().title("Stderr").borders(Borders::ALL));
-        f.render_widget(errors_box, chunks[1]);
-    }
 
     // TODO Add vertical scrolling.
     let output_box =
