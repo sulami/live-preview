@@ -17,7 +17,9 @@ use tui::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "tokio-console")]
     console_subscriber::init();
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
