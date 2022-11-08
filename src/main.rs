@@ -54,7 +54,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<Option<String>> {
     let mut state = State::default();
-
+    let mut event_stream = EventStream::new();
     let (cmd_tx, cmd_rx) = channel::<Cmd>(1);
     let (output_tx, mut output_rx) = channel::<Option<String>>(1);
 
@@ -72,7 +72,7 @@ async fn event_loop(
                 }
                 terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
             },
-            maybe_action = input_handler() => {
+            maybe_action = input_handler(&mut event_stream) => {
                 match maybe_action {
                     Some(Action::Done) => {
                         cmd_tx.send(Cmd::Done).await?;
@@ -117,9 +117,8 @@ enum Action {
     Type(char),
 }
 
-async fn input_handler() -> Option<Action> {
-    let mut event_stream = EventStream::new();
-    let action = match event_stream.next().await {
+async fn input_handler(events: &mut EventStream) -> Option<Action> {
+    let action = match events.next().await {
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Esc,
             kind: event::KeyEventKind::Press,
