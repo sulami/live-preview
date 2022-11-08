@@ -59,42 +59,40 @@ async fn event_loop(
 
     loop {
         select! {
-            msg = output_rx.recv() => {
-                if let Some(output) = msg {
-                    state.output = output;
-                    terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
-                }
+            Some(output) = output_rx.recv() => {
+                state.output = output;
+                terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
             },
-            msg = input_handler() => {
-                if let Some(action) = msg {
-                    match action {
-                        Action::Done => {
-                            cmd_tx.send(Cmd::Done).await?;
-                            return Ok(Some(state.output))
-                        },
-                        Action::Abort => {
-                            cmd_tx.send(Cmd::Done).await?;
-                            return Ok(None)
-                        },
-                        Action::CursorLeft => if state.cursor > 0 {
-                            state.cursor -= 1
-                        },
-                        Action::CursorRight => if state.cursor < state.input.len() as u16 {
-                            state.cursor += 1
-                        },
-                        Action::Delete => if state.cursor > 0 {
-                            state.cursor -= 1;
-                            state.input.remove(state.cursor as usize);
-                            cmd_tx.send(Cmd::Input(state.input.clone())).await?;
-                        },
-                        Action::Type(chr) => {
-                            state.input.insert(state.cursor as usize, chr);
-                            state.cursor += 1;
-                            cmd_tx.send(Cmd::Input(state.input.clone())).await?;
-                        }
-                    }
-                    terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
+            maybe_action = input_handler() => {
+                match maybe_action {
+                    Some(Action::Done) => {
+                        cmd_tx.send(Cmd::Done).await?;
+                        return Ok(Some(state.output))
+                    },
+                    Some(Action::Abort) => {
+                        cmd_tx.send(Cmd::Done).await?;
+                        return Ok(None)
+                    },
+                    Some(Action::CursorLeft) => if state.cursor > 0 {
+                        state.cursor -= 1
+                    },
+                    Some(Action::CursorRight) => if state.cursor < state.input.len() as u16 {
+                        state.cursor += 1
+                    },
+                    Some(Action::Delete) => if state.cursor > 0 {
+                        state.cursor -= 1;
+                        state.input.remove(state.cursor as usize);
+                        cmd_tx.send(Cmd::Input(state.input.clone())).await?;
+                    },
+                    Some(Action::Type(chr)) => {
+                        state.input.insert(state.cursor as usize, chr);
+                        state.cursor += 1;
+                        cmd_tx.send(Cmd::Input(state.input.clone())).await?;
+                    },
+                    // Take it off the channel to avoid deadlocking.
+                    None => {},
                 }
+                terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
             },
         }
     }
@@ -113,37 +111,31 @@ enum Action {
 async fn input_handler() -> Option<Action> {
     let mut event_stream = crossterm::event::EventStream::new();
     let action = match event_stream.next().await {
-        // Abort
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Esc,
             kind: event::KeyEventKind::Press,
             ..
         }))) => Some(Action::Abort),
-        // Done
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Enter,
             kind: event::KeyEventKind::Press,
             ..
         }))) => Some(Action::Done),
-        // Cursor left
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Left,
             kind: event::KeyEventKind::Press,
             ..
         }))) => Some(Action::CursorLeft),
-        // Cursor right
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Right,
             kind: event::KeyEventKind::Press,
             ..
         }))) => Some(Action::CursorRight),
-        // Delete
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Backspace,
             kind: event::KeyEventKind::Press,
             ..
         }))) => Some(Action::Delete),
-        // Typing
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Char(char),
             kind: event::KeyEventKind::Press,
@@ -168,23 +160,21 @@ async fn child_handler(
 
     loop {
         select! {
-            output = futures::future::OptionFuture::from(child_proc.map(|c| c.wait_with_output())) => {
-                if let Some(Ok(o)) = output {
-                    if !o.stdout.is_empty() {
-                        if let Ok(s) = String::from_utf8(o.stdout) {
-                            output_chan.send(s).await?;
-                        } else {
-                            output_chan.send("".to_string()).await?;
-                        }
-                    } else if !o.stderr.is_empty() {
-                        if let Ok(s) = String::from_utf8(o.stderr) {
-                            output_chan.send(s).await?;
-                        } else {
-                            output_chan.send("".to_string()).await?;
-                        }
+            Some(Ok(output)) = futures::future::OptionFuture::from(child_proc.map(|c| c.wait_with_output())) => {
+                if !output.stdout.is_empty() {
+                    if let Ok(s) = String::from_utf8(output.stdout) {
+                        output_chan.send(s).await?;
                     } else {
                         output_chan.send("".to_string()).await?;
                     }
+                } else if !output.stderr.is_empty() {
+                    if let Ok(s) = String::from_utf8(output.stderr) {
+                        output_chan.send(s).await?;
+                    } else {
+                        output_chan.send("".to_string()).await?;
+                    }
+                } else {
+                    output_chan.send("".to_string()).await?;
                 }
                 child_proc = None;
             },
@@ -228,7 +218,7 @@ fn draw_ui(
         .constraints([Constraint::Length(3), Constraint::Min(3)].as_ref())
         .split(f.size());
 
-    // TODO Add dynamic resize.
+    // TODO Add dynamic resize for longer inputs.
     let input_box = Paragraph::new(input)
         .block(Block::default().title("Stdin").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
