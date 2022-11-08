@@ -2,12 +2,15 @@ use std::io;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::StreamExt;
-use tokio::{process, select, sync::mpsc};
+use futures::{future::OptionFuture, StreamExt};
+use tokio::{
+    process, select,
+    sync::mpsc::{channel, Receiver, Sender},
+};
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -48,12 +51,12 @@ struct State {
 }
 
 async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<Option<String>> {
     let mut state = State::default();
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(1);
-    let (output_tx, mut output_rx) = mpsc::channel::<Option<String>>(1);
+    let (cmd_tx, cmd_rx) = channel::<Cmd>(1);
+    let (output_tx, mut output_rx) = channel::<Option<String>>(1);
 
     terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
 
@@ -115,7 +118,7 @@ enum Action {
 }
 
 async fn input_handler() -> Option<Action> {
-    let mut event_stream = crossterm::event::EventStream::new();
+    let mut event_stream = EventStream::new();
     let action = match event_stream.next().await {
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Esc,
@@ -159,14 +162,14 @@ enum Cmd {
 }
 
 async fn child_handler(
-    mut cmd_chan: mpsc::Receiver<Cmd>,
-    output_chan: mpsc::Sender<Option<String>>,
+    mut cmd_chan: Receiver<Cmd>,
+    output_chan: Sender<Option<String>>,
 ) -> Result<()> {
     let mut child_proc: Option<process::Child> = None;
 
     loop {
         select! {
-            Some(Ok(output)) = futures::future::OptionFuture::from(child_proc.map(|c| c.wait_with_output())) => {
+            Some(Ok(output)) = OptionFuture::from(child_proc.map(|c| c.wait_with_output())) => {
                 if !output.stdout.is_empty() {
                     if let Ok(s) = String::from_utf8(output.stdout) {
                         output_chan.send(Some(s)).await?;
