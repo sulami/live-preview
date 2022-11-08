@@ -51,7 +51,7 @@ async fn event_loop(
     let mut state = State::default();
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(1);
-    let (output_tx, mut output_rx) = mpsc::channel::<String>(1);
+    let (output_tx, mut output_rx) = mpsc::channel::<Option<String>>(1);
 
     terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
 
@@ -60,7 +60,11 @@ async fn event_loop(
     loop {
         select! {
             Some(output) = output_rx.recv() => {
-                state.output = output;
+                if let Some(s) = output {
+                    state.output = s;
+                } else {
+                    state.output.clear();
+                }
                 terminal.draw(|f| draw_ui(f, &state.cursor, &state.input, &state.output))?;
             },
             maybe_action = input_handler() => {
@@ -154,7 +158,7 @@ enum Cmd {
 
 async fn child_handler(
     mut cmd_chan: mpsc::Receiver<Cmd>,
-    output_chan: mpsc::Sender<String>,
+    output_chan: mpsc::Sender<Option<String>>,
 ) -> Result<()> {
     let mut child_proc: Option<process::Child> = None;
 
@@ -163,18 +167,18 @@ async fn child_handler(
             Some(Ok(output)) = futures::future::OptionFuture::from(child_proc.map(|c| c.wait_with_output())) => {
                 if !output.stdout.is_empty() {
                     if let Ok(s) = String::from_utf8(output.stdout) {
-                        output_chan.send(s).await?;
+                        output_chan.send(Some(s)).await?;
                     } else {
-                        output_chan.send("".to_string()).await?;
+                        output_chan.send(Some("Non-UTF8 stdout".to_string())).await?;
                     }
                 } else if !output.stderr.is_empty() {
                     if let Ok(s) = String::from_utf8(output.stderr) {
-                        output_chan.send(s).await?;
+                        output_chan.send(Some(s)).await?;
                     } else {
-                        output_chan.send("".to_string()).await?;
+                        output_chan.send(Some("Non-UTF8 stderr".to_string())).await?;
                     }
                 } else {
-                    output_chan.send("".to_string()).await?;
+                    output_chan.send(None).await?;
                 }
                 child_proc = None;
             },
