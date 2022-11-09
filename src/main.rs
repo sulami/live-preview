@@ -118,7 +118,7 @@ enum Action {
 }
 
 async fn input_handler(events: &mut EventStream) -> Option<Action> {
-    let action = match events.next().await {
+    match events.next().await {
         Some(Ok(Event::Key(event::KeyEvent {
             code: KeyCode::Esc,
             kind: event::KeyEventKind::Press,
@@ -150,8 +150,7 @@ async fn input_handler(events: &mut EventStream) -> Option<Action> {
             ..
         }))) => Some(Action::Type(char)),
         _ => None,
-    };
-    action
+    }
 }
 
 #[derive(Debug)]
